@@ -1,10 +1,65 @@
 class Metronome {
+    // Métodos para el control de wake lock (evitar que la pantalla se apague)
+    async requestWakeLock() {
+        // Verificar si la API está disponible
+        if ('wakeLock' in navigator) {
+            try {
+                // Liberar cualquier wake lock anterior
+                this.releaseWakeLock();
+                
+                // Solicitar un nuevo wake lock
+                this.wakeLock = await navigator.wakeLock.request('screen');
+                
+                console.log('Wake Lock activado');
+                
+                // Agregar un controlador de eventos para liberar el bloqueo si la página se oculta
+                this.wakeLock.addEventListener('release', () => {
+                    console.log('Wake Lock liberado');
+                });
+                
+                return true;
+            } catch (err) {
+                console.error(`Error al solicitar Wake Lock: ${err.name}, ${err.message}`);
+                return false;
+            }
+        } else {
+            console.warn('Wake Lock API no soportada en este navegador');
+            return false;
+        }
+    }
+    
+    releaseWakeLock() {
+        if (this.wakeLock) {
+            try {
+                this.wakeLock.release();
+                this.wakeLock = null;
+                console.log('Wake Lock liberado manualmente');
+            } catch (err) {
+                console.error(`Error al liberar Wake Lock: ${err}`);
+            }
+        }
+    }
     constructor() {
-        this.audioContext = null;
+        // Inicializar Web Audio API
+        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
         this.isPlaying = false;
         this.tempo = 120;
-        this.intervalId = null;
+        this.nextNoteTime = 0;
+        this.timerID = null;
+        this.scheduleAheadTime = 0.1; // Tiempo de anticipación en segundos
+        this.lookAheadBuffer = 0.25; // Buffer de anticipación adicional para compensar retrasos (250ms)
         this.currentSound = 'metClick';
+        this.buffers = {}; // Para almacenar los buffers de audio
+        
+        // Corrección de desviación temporal
+        this.expectedNextNoteTime = 0; // Tiempo esperado para la próxima nota
+        this.timeCorrection = 0; // Corrección acumulada
+        this.timingHistory = []; // Historial de desviaciones
+        this.maxTimingHistory = 10; // Cantidad máxima de entradas en el historial
+        this.stabilityThreshold = 0.025; // Umbral de desviación en segundos (25ms)
+        
+        // No sleep mode
+        this.wakeLock = null; // Para almacenar la referencia al wake lock
         
         // URLs de sonidos
         this.soundUrls = {
@@ -25,9 +80,6 @@ class Metronome {
             metTick: 'https://cdn.freesound.org/previews/250/250551_4570971-lq.mp3',
             metStick: 'https://cdn.freesound.org/previews/708/708309_15362740-lq.mp3'
         };
-        
-        // Objeto para instancias de Audio precargadas
-        this.sounds = {};
         
         // DOM Elements
         this.tempoSlider = document.getElementById('tempo');
@@ -52,10 +104,8 @@ class Metronome {
         this.tempoSlider.addEventListener('input', () => {
             this.tempo = Number(this.tempoSlider.value);
             this.bpmValue.textContent = this.tempo;
-            if (this.isPlaying) {
-                this.stop();
-                this.start();
-            }
+            // No necesitamos reiniciar para cambiar el tempo
+            // con Web Audio API el cambio se reflejará en la siguiente nota
         });
 
         this.startStopBtn.addEventListener('click', () => {
@@ -63,6 +113,14 @@ class Metronome {
                 this.stop();
             } else {
                 this.start();
+            }
+        });
+        
+        // Agregar escuchador para detectar cuando el documento vuelve a estar visible
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible' && this.isPlaying) {
+                // Si volvemos a la página y el metrónomo estaba sonando, solicitar wake lock nuevamente
+                this.requestWakeLock();
             }
         });
 
@@ -180,40 +238,199 @@ class Metronome {
     }
 
     preloadSounds() {
-        // Cargar todos los sonidos en memoria
+        // Cargar todos los sonidos como AudioBuffers
         Object.keys(this.soundUrls).forEach(key => {
-            this.sounds[key] = new Audio(this.soundUrls[key]);
-            // Precargar el audio
-            this.sounds[key].load();
+            const url = this.soundUrls[key];
+            fetch(url)
+                .then(response => response.arrayBuffer())
+                .then(arrayBuffer => this.audioContext.decodeAudioData(arrayBuffer))
+                .then(audioBuffer => {
+                    this.buffers[key] = audioBuffer;
+                })
+                .catch(e => console.error(`Error cargando el sonido ${key}:`, e));
         });
     }
     
-    playSound() {
-        // Si el audio está actualmente reproduciendo, reiniciarlo
-        const sound = this.sounds[this.currentSound];
-        sound.currentTime = 0;
-        sound.play();
+    playSound(time = 0) {
+        // Verificar si el buffer está cargado
+        if (!this.buffers[this.currentSound]) {
+            return; // El buffer aún no está disponible
+        }
+
+        // Crear un nodo de fuente de sonido
+        const source = this.audioContext.createBufferSource();
+        source.buffer = this.buffers[this.currentSound];
+        
+        // Crear un nodo de ganancia para controlar el volumen
+        const gainNode = this.audioContext.createGain();
+        gainNode.gain.value = 1.0; // Volumen completo
+        
+        // Conectar fuente -> ganancia -> destino
+        source.connect(gainNode);
+        gainNode.connect(this.audioContext.destination);
+        
+        // Programar la reproducción del sonido con margen de seguridad
+        // Si el tiempo programado ya pasó, reproducir inmediatamente
+        const safeTime = Math.max(time, this.audioContext.currentTime);
+        source.start(safeTime);
+        
+        // Agregar un evento para verificar la latencia real de reproducción
+        // Esto podría ayudar a refinar aún más la corrección temporal
+        if ('performance' in window) {
+            const scheduledTime = time;
+            const actualStartTime = this.audioContext.currentTime;
+            
+            // Calcular latencia entre tiempo programado y tiempo real
+            const latency = actualStartTime - scheduledTime;
+            
+            // Solo registrar latencias positivas (atrasos) que no sean extremas
+            if (latency > 0 && latency < 0.1) {
+                // Llevar un registro de latencias para análisis
+                if (!this.latencies) this.latencies = [];
+                this.latencies.push(latency);
+                
+                // Limitar tamaño de historial de latencias
+                if (this.latencies.length > 20) {
+                    this.latencies.shift();
+                }
+                
+                // Ajustar buffer de anticipación dinámicamente según latencia promedio
+                if (this.latencies.length >= 10) {
+                    const avgLatency = this.latencies.reduce((sum, val) => sum + val, 0) / this.latencies.length;
+                    // Establecer buffer como 2x la latencia promedio + margen
+                    this.lookAheadBuffer = Math.min(Math.max(avgLatency * 2 + 0.1, 0.2), 0.5);
+                }
+            }
+        }
     }
 
-    start() {
-        this.isPlaying = true;
-        this.startStopBtn.innerHTML = '<i class="fas fa-stop"></i>';
+    scheduler() {
+        const currentTime = this.audioContext.currentTime;
         
-        const interval = (60 / this.tempo) * 1000;
-        this.playSound(); // Reproducir inmediatamente al iniciar
-        this.intervalId = setInterval(() => this.playSound(), interval);
+        // Mientras haya notas que programar antes del tiempo de anticipación (incluyendo buffer adicional)
+        while (this.nextNoteTime < currentTime + this.scheduleAheadTime + this.lookAheadBuffer) {
+            // Si es la primera nota o después de una pausa, guardar tiempo esperado
+            if (this.expectedNextNoteTime <= 0) {
+                this.expectedNextNoteTime = this.nextNoteTime;
+            } else {
+                // Calcular desviación entre tiempo real y esperado
+                const deviation = this.nextNoteTime - this.expectedNextNoteTime;
+                
+                // Registrar desviación en el historial
+                this.recordTimingDeviation(deviation);
+                
+                // Aplicar corrección si la desviación supera el umbral
+                if (Math.abs(deviation) > this.stabilityThreshold) {
+                    // Calcular corrección (50% de la desviación para evitar sobre-corrección)
+                    this.timeCorrection -= (deviation * 0.5);
+                    
+                    // Aplicar la corrección al tiempo de la nota
+                    this.nextNoteTime = this.expectedNextNoteTime + this.timeCorrection;
+                }
+            }
+            
+            this.playSound(this.nextNoteTime);
+            this.triggerVisualFeedback(this.nextNoteTime);
+            
+            // Calcular tiempo para la siguiente nota
+            const secondsPerBeat = 60.0 / this.tempo;
+            this.nextNoteTime += secondsPerBeat;
+            this.expectedNextNoteTime += secondsPerBeat;
+        }
         
-        // Añadir feedback visual cuando suena
-        this.startVisualFeedback();
+        // Configurar el próximo llamado a scheduler (intervalo más corto para mayor precisión)
+        this.timerID = setTimeout(() => this.scheduler(), 20);
+    }
+    
+    // Registrar desviación en el historial y calcular corrección adaptativa
+    recordTimingDeviation(deviation) {
+        // Añadir desviación al historial
+        this.timingHistory.push(deviation);
+        
+        // Mantener el historial dentro del límite
+        if (this.timingHistory.length > this.maxTimingHistory) {
+            this.timingHistory.shift();
+        }
+        
+        // Si hay suficiente historial, analizar tendencia
+        if (this.timingHistory.length >= 3) {
+            // Calcular tendencia (promedio de las últimas desviaciones)
+            const recentDeviations = this.timingHistory.slice(-3);
+            const avgDeviation = recentDeviations.reduce((sum, val) => sum + val, 0) / recentDeviations.length;
+            
+            // Si hay una tendencia consistente, ajustar la corrección global
+            if (Math.abs(avgDeviation) > this.stabilityThreshold / 2) {
+                // Ajuste sutil para evitar oscilaciones
+                this.timeCorrection -= (avgDeviation * 0.1);
+            }
+        }
+    }
+    
+    async start() {
+        try {
+            // Reactivar contexto de audio si está suspendido
+            if (this.audioContext.state === 'suspended') {
+                this.audioContext.resume();
+            }
+            
+            this.isPlaying = true;
+            this.startStopBtn.innerHTML = '<i class="fas fa-stop"></i>';
+            
+            // Inicializar el tiempo para la primera nota (con un pequeño retraso para permitir la inicialización)
+            this.nextNoteTime = this.audioContext.currentTime + 0.05;
+            
+            // Reiniciar mecanismo de corrección temporal
+            this.resetTimingCorrection();
+            
+            // Iniciar el programador
+            this.scheduler();
+            
+            // Añadir feedback visual cuando suena
+            this.startVisualFeedback();
+            
+            // Activar el wake lock para evitar que la pantalla se apague
+            await this.requestWakeLock();
+        } catch (err) {
+            console.error('Error al iniciar el metrónomo:', err);
+        }
+    }
+    
+    // Reiniciar el mecanismo de corrección temporal
+    resetTimingCorrection() {
+        this.expectedNextNoteTime = 0;
+        this.timeCorrection = 0;
+        this.timingHistory = [];
     }
 
     stop() {
         this.isPlaying = false;
         this.startStopBtn.innerHTML = '<i class="fas fa-play"></i>';
-        clearInterval(this.intervalId);
+        
+        // Detener el programador
+        clearTimeout(this.timerID);
+        this.timerID = null;
         
         // Detener feedback visual
         this.stopVisualFeedback();
+        
+        // Liberar el wake lock
+        this.releaseWakeLock();
+    }
+    
+    triggerVisualFeedback(time) {
+        // Calcular el tiempo de espera hasta que se reproduzca la nota
+        const waitTime = (time - this.audioContext.currentTime) * 1000;
+        
+        // Programar el efecto visual para que coincida con la reproducción de audio
+        setTimeout(() => {
+            if (this.pulseElement) {
+                // Reiniciar la animación
+                this.pulseElement.style.animation = 'none';
+                this.pulseElement.offsetHeight; // Forzar repintado
+                this.pulseElement.style.animation = `pulse ${60 / this.tempo}s ease-in-out infinite`;
+                this.pulseElement.style.opacity = '0.7';
+            }
+        }, waitTime);
     }
     
     startVisualFeedback() {
@@ -773,10 +990,8 @@ class Metronome {
         this.tempoSlider.value = this.tempo;
         this.bpmValue.textContent = this.tempo;
         
-        if (this.isPlaying) {
-            this.stop();
-            this.start();
-        }
+        // Con Web Audio API, cambiar el tempo no requiere reiniciar
+        // El nuevo tempo se aplicará en la siguiente nota programada
     }
 
     deleteSong(index) {
