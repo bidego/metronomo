@@ -1,0 +1,96 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#3a6ea5">
+    <title>Metrónomo</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.css">
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>Metrónomo</h1>
+        
+        <div class="metronome-controls">
+            <div class="tempo-container">
+                <label for="tempo">BPM</label>
+                <span id="bpm-value">120</span>
+                <input type="range" id="tempo" min="40" max="208" value="120">
+            </div>
+            
+            <div class="sound-selector">
+                <label for="soundSelect">Seleccionar sonido:</label>
+                <select id="soundSelect">
+                    <optgroup label="Sonidos de metrónomo">
+                        <option value="metClick">Metrónomo Click</option>
+                        <option value="metBell">Metrónomo Bell</option>
+                        <option value="metWood">Metrónomo Wood</option>
+                        <option value="metTick">Metrónomo Tick</option>
+                        <option value="metStick">Metrónomo Stick</option>
+                    </optgroup>
+                    <optgroup label="Sonidos de batería">
+                        <option value="click">Click</option>
+                        <option value="woodblock">Woodblock</option>
+                        <option value="cowbell">Cowbell</option>
+                        <option value="hihat">Hi-Hat</option>
+                        <option value="snare">Snare</option>
+                        <option value="tom">Tom</option>
+                        <option value="kick">Kick</option>
+                        <option value="boom">Boom</option>
+                    </optgroup>
+                </select>
+            </div>
+            
+            <div class="main-controls">
+                <button id="tap-tempo" class="tap-btn" title="Tap para establecer tempo"><i class="fas fa-hand-pointer"></i></button>
+                <button id="start-stop"><i class="fas fa-play"></i></button>
+            </div>
+        </div>
+
+        <div class="song-list">
+            <div class="song-list-header">
+                <h2>Lista de Temas</h2>
+                <button id="share-btn" class="share-btn" title="Compartir lista"><i class="fas fa-share-alt"></i></button>
+            </div>
+            <div class="add-song">
+                <input type="text" id="song-name" placeholder="Nombre del tema">
+                <input type="number" id="song-bpm" placeholder="BPM (opcional)">
+                <button id="add-song"><i class="fas fa-plus"></i> Agregar</button>
+            </div>
+            <ul id="songs"></ul>
+            
+            <!-- Modal de compartir -->
+            <div id="share-modal" class="share-modal">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>Compartir Lista</h3>
+                        <button id="close-share-modal" class="close-btn"><i class="fas fa-times"></i></button>
+                    </div>
+                    <div class="form-group">
+                        <p>Comparte este enlace para que otros puedan usar tu lista de temas:</p>
+                        <div class="share-url-container">
+                            <input type="text" id="share-url" readonly>
+                            <button id="copy-url" class="icon-btn"><i class="fas fa-copy"></i></button>
+                        </div>
+                        <div id="copy-message" class="copy-message">¡Enlace copiado!</div>
+                        
+                        <div class="share-options">
+                            <button id="share-whatsapp" class="share-option-btn whatsapp">
+                                <i class="fab fa-whatsapp"></i> WhatsApp
+                            </button>
+                            <button id="share-email" class="share-option-btn email">
+                                <i class="fas fa-envelope"></i> Email
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
